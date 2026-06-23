@@ -83,30 +83,23 @@ HMS_NAME   = BASIN_NAME.replace("-", "_")                   # e.g. AZ12_100 (HMS
 site_path  = os.path.join(ROOT, SITE_DIR)
 OUT_DIR    = os.path.join(site_path, "outputs")
 
-basin_src  = os.path.join(OUT_DIR, BASIN_NAME + ".basin")
-dss_src    = os.path.join(OUT_DIR, HMS_NAME + ".dss")
+proj_dir = os.path.join(HMS_DIR, HMS_NAME)
+basin_dst_name = HMS_NAME + ".basin"
+basin_src  = os.path.join(proj_dir, basin_dst_name)  # write_basin.py writes here directly
 
-# One .met + .gage file per storm
+# met/gage/dss are written directly to HMS project folder by write_met.py
 STORMS = [
     ("6hr_100yr",  360),
     ("24hr_100yr", 1440),
 ]
-met_models = []  # list of (model_name, met_src, met_dst, gage_src, gage_dst)
+met_models = []  # (model_name, met_dst_name, gage_dst_name)
 for suffix, _ in STORMS:
     model_name = "%s_%s" % (HMS_NAME, suffix)
     met_models.append((
         model_name,
-        os.path.join(OUT_DIR, model_name + ".met"),
         model_name + ".met",
-        os.path.join(OUT_DIR, model_name + ".gage"),
         model_name + ".gage",
     ))
-
-proj_dir = os.path.join(HMS_DIR, HMS_NAME)
-
-# Basin destination filename (no hyphens)
-basin_dst_name = HMS_NAME + ".basin"
-dss_dst_name   = HMS_NAME + ".dss"
 
 CRLF = "\r\n"
 
@@ -114,21 +107,25 @@ CRLF = "\r\n"
 # --- preflight -------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-missing = []
 if not os.path.isfile(basin_src):
-    missing.append((basin_src, ".basin"))
-if not os.path.isfile(dss_src):
-    missing.append((dss_src, ".dss"))
-for model_name, met_src, _, gage_src, __ in met_models:
-    if not os.path.isfile(met_src):
-        missing.append((met_src, ".met for %s" % model_name))
-    if not os.path.isfile(gage_src):
-        missing.append((gage_src, ".gage for %s" % model_name))
-if missing:
-    msgs = "\n".join("  %s (%s)" % (p, l) for p, l in missing)
     raise Exception(
-        "Required file(s) not found:\n%s\n"
-        "Run write_basin.py and write_met.py before write_hms_project.py." % msgs)
+        ".basin not found at:\n  %s\n"
+        "Run write_basin.py before write_hms_project.py." % basin_src)
+
+# Check met/gage/dss are in the HMS project folder (written by write_met.py)
+missing = []
+dss_path = os.path.join(proj_dir, HMS_NAME + ".dss")
+if not os.path.isfile(dss_path):
+    missing.append(HMS_NAME + ".dss")
+for model_name, met_dst, gage_dst in met_models:
+    if not os.path.isfile(os.path.join(proj_dir, met_dst)):
+        missing.append(met_dst)
+    if not os.path.isfile(os.path.join(proj_dir, gage_dst)):
+        missing.append(gage_dst)
+if missing:
+    raise Exception(
+        "Run write_met.py before write_hms_project.py.\n"
+        "Missing in %s:\n  %s" % (proj_dir, "\n  ".join(missing)))
 
 # ---------------------------------------------------------------------------
 # --- helpers ---------------------------------------------------------------
@@ -165,20 +162,12 @@ print("Project folder: %s" % proj_dir)
 # --- copy .basin and .met --------------------------------------------------
 # ---------------------------------------------------------------------------
 
-basin_dst = os.path.join(proj_dir, basin_dst_name)
-shutil.copy2(basin_src, basin_dst)
-print("Copied: %s" % basin_dst_name)
-
-# Copy DSS (contains all hyetograph time series)
-dss_dst = os.path.join(proj_dir, dss_dst_name)
-shutil.copy2(dss_src, dss_dst)
-print("Copied: %s" % dss_dst_name)
+# Basin file is already written directly to proj_dir by write_basin.py
+print("Basin file present: %s" % basin_dst_name)
 
 # Copy per-storm .met files (no longer copying individual .gage files --
 # gages are written to the project-level .gage file by write_hms_project.py)
-for model_name, met_src, met_dst_name, gage_src, gage_dst_name in met_models:
-    shutil.copy2(met_src, os.path.join(proj_dir, met_dst_name))
-    print("Copied: %s" % met_dst_name)
+print("HMS project folder ready: %s" % proj_dir)
 
 # ---------------------------------------------------------------------------
 # --- write .control files --------------------------------------------------
@@ -297,7 +286,7 @@ hms_lines += [
 ]
 
 # Precipitation (met model) blocks -- one per storm
-for model_name, _, met_dst_name, __, gage_dst_name in met_models:
+for model_name, met_dst_name, _ in met_models:
     hms_lines += [
         "Precipitation: " + model_name,
         "     Filename: %s" % met_dst_name,
@@ -336,16 +325,16 @@ gage_lines = [
     "",
 ]
 
-for model_name, _, __, gage_src, gage_dst_name in met_models:
+for model_name, _, __ in met_models:
     gage_name  = model_name + "_Gage"
     dss_pathname = "/%s/%s/PRECIP-INC/01Jan2000/6Minute/ATLAS14/" % (HMS_NAME, gage_name)
 
-    # End time depends on storm duration
-    suffix = model_name.split("_")[-2] + "_" + model_name.split("_")[-1]  # e.g. 6hr_100yr
+    # End time = storm duration + 50% recession tail (matches control spec)
     storm_min = 360 if "6hr" in model_name else 1440
+    tail_min  = int(storm_min * 1.5)   # storm + 50% tail
     from datetime import timedelta, datetime as dt
     start = dt(2000, 1, 1, 0, 0)
-    end   = start + timedelta(minutes=storm_min)
+    end   = start + timedelta(minutes=tail_min)
     end_str = end.strftime("%-d %B %Y, %H:%M")
 
     gage_lines += [
@@ -375,11 +364,39 @@ write_crlf(project_gage_path, CRLF.join(gage_lines))
 print("Wrote: %s.gage" % HMS_NAME)
 
 # ---------------------------------------------------------------------------
-# --- create empty .dss placeholder -----------------------------------------
-dss_path = os.path.join(proj_dir, HMS_NAME + ".dss")
-if not os.path.exists(dss_path):
-    open(dss_path, "wb").close()
-    print("Created: %s.dss (empty placeholder)" % HMS_NAME)
+# --- write .run file (simulation run definitions) --------------------------
+# One run per storm, pairing basin + precip (met) + control.
+# Keywords matched exactly to HMS 4.13 output: Basin:, Precip:, Control:
+# ---------------------------------------------------------------------------
+
+run_lines = []
+for model_name, _, __ in met_models:
+    suffix    = model_name[len(HMS_NAME)+1:]   # e.g. "6hr_100yr"
+    ctrl_name = "%s_%s" % (HMS_NAME, suffix)
+    run_name  = "Run %s" % suffix              # e.g. "Run 6hr_100yr"
+    safe_run  = run_name.replace(" ", "_")     # for log/dss filenames
+
+    run_lines += [
+        "Run: " + run_name,
+        "     Default Description: Yes",
+        "     Log File: %s.log" % safe_run,
+        "     DSS File: %s.dss" % safe_run,
+        "     Is Save Spatial Results: No",
+        "     Last Modified Date: " + DATE,
+        "     Last Modified Time: " + TIME,
+        "     Basin: " + HMS_NAME,
+        "     Precip: " + model_name,
+        "     Control: " + ctrl_name,
+        "     Time-Series Output: Save All",
+        "     Time Series Results Manager Start: ",
+        "     Time Series Results Manager End: ",
+        "End:",
+        "",
+    ]
+
+run_path = os.path.join(proj_dir, HMS_NAME + ".run")
+write_crlf(run_path, CRLF.join(run_lines))
+print("Wrote: %s.run (%d simulation runs)" % (HMS_NAME, len(met_models)))
 
 # ---------------------------------------------------------------------------
 # --- summary ---------------------------------------------------------------
@@ -396,10 +413,11 @@ for f in os.listdir(proj_dir):
     if os.path.isfile(os.path.join(proj_dir, f)):
         print("    %s" % f)
 print("")
-print("  To run a simulation:")
-print("    Compute -> Simulation Run Manager -> New")
-print("    Basin Model   : %s" % BASIN_NAME)
-print("    Met Model     : %s_6hr_100yr  (or 24hr)" % BASIN_NAME)
-print("    Control Specs : %s_6hr_100yr.control (or 24hr)" % BASIN_NAME)
+print("  Simulation runs created (ready to compute):")
+for model_name, _, __ in met_models:
+    suffix = model_name[len(HMS_NAME)+1:]
+    print("    Run %s" % suffix)
+print("")
+print("  Open in HMS and click Compute. Runs are pre-wired.")
 print("")
 print("PRE-SEAL: verify hyetograph shape and peak timing in HMS before sealing.")

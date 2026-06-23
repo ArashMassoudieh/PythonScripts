@@ -92,6 +92,7 @@ except NameError:
 
 import os as _os
 BASIN_NAME = _os.path.basename(_os.path.normpath(SITE_DIR))
+HMS_NAME   = BASIN_NAME.replace("-", "_")   # HMS forbids hyphens in model names
 
 # defaults (overridable per element via optional gpkg columns)
 DEF_LOSS      = "SCS"
@@ -111,7 +112,15 @@ OUT_DIR    = os.path.join(site_path, "outputs")
 params_p   = os.path.join(OUT_DIR, "subwatershed_params.gpkg")
 reaches_p  = os.path.join(OUT_DIR, "reaches.gpkg")
 junc_p     = os.path.join(OUT_DIR, "junctions.gpkg")
-basin_out  = os.path.join(OUT_DIR, BASIN_NAME + ".basin")
+
+try:
+    HMS_DIR
+except NameError:
+    HMS_DIR = os.path.join(ROOT, "WS3_HMS")
+
+HMS_PROJ_DIR = os.path.join(HMS_DIR, HMS_NAME)
+os.makedirs(HMS_PROJ_DIR, exist_ok=True)
+basin_out  = os.path.join(HMS_PROJ_DIR, HMS_NAME + ".basin")
 
 M2_TO_MI2 = 1.0 / 2_589_988.110336
 M_TO_FT   = 3.280839895
@@ -199,7 +208,7 @@ out = []
 
 # ---- file header block ----
 out.append(blk(
-    ["Basin: " + BASIN_NAME] + hdr("")[1:] + [
+    ["Basin: " + HMS_NAME] + hdr("")[1:] + [
         "     Version: 4.13",
         "     Filepath Separator: \\",
         "     Unit System: English",
@@ -276,9 +285,7 @@ for f in subs.getFeatures():
             ""]
 
     lines += [
-        "     Baseflow: Linear Reservoir",
-        "     Groundwater Layer: 1",
-        "     GW-1 Number Reservoirs: 1",
+        "     Baseflow: None",
         "End:"]
 
     out.append(blk(lines))

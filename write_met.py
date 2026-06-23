@@ -72,10 +72,20 @@ RETURN_PERIOD = 100
 BASIN_NAME = os.path.basename(os.path.normpath(SITE_DIR))
 HMS_NAME   = BASIN_NAME.replace("-", "_")
 site_path  = os.path.join(ROOT, SITE_DIR)
-OUT_DIR    = os.path.join(site_path, "outputs")
+OUT_DIR    = os.path.join(site_path, "outputs")   # for topology.gpkg and atlas14/
 PF_CSV     = os.path.join(site_path, "atlas14", "atlas14_pf.csv")
 TOPO_PATH  = os.path.join(OUT_DIR, "topology.gpkg")
-DSS_PATH   = os.path.join(OUT_DIR, HMS_NAME + ".dss")
+
+# All HMS files written directly to the HMS project folder
+try:
+    HMS_DIR
+except NameError:
+    HMS_DIR = os.path.join(ROOT, "WS3_HMS")
+
+HMS_PROJ_DIR = os.path.join(HMS_DIR, HMS_NAME)
+os.makedirs(HMS_PROJ_DIR, exist_ok=True)
+
+DSS_PATH = os.path.join(HMS_PROJ_DIR, HMS_NAME + ".dss")
 
 CRLF = "\r\n"
 
@@ -226,14 +236,29 @@ def build_atlas14_hyetograph(storm_dur_min, total_depth_in):
     peak_idx = max(0, min(int(round(0.40 * n_steps)) - 1, n_steps - 1))
     sorted_inc = sorted(increments, reverse=True)
     arranged = [0.0] * n_steps
-    lo, hi = peak_idx, peak_idx
-    for k, val in enumerate(sorted_inc):
-        if k % 2 == 0:
-            arranged[hi] = val
-            hi = min(hi + 1, n_steps - 1)
+
+    # Place largest increment at peak_idx, then alternate left/right.
+    # When one side is exhausted continue filling the other side only.
+    positions = [peak_idx]
+    lo, hi = peak_idx - 1, peak_idx + 1
+    while len(positions) < n_steps:
+        if hi < n_steps and lo >= 0:
+            # Both sides available -- alternate: right on even count, left on odd
+            if len(positions) % 2 == 1:
+                positions.append(hi)
+                hi += 1
+            else:
+                positions.append(lo)
+                lo -= 1
+        elif hi < n_steps:
+            positions.append(hi)
+            hi += 1
         else:
-            arranged[lo] = val
-            lo = max(lo - 1, 0)
+            positions.append(lo)
+            lo -= 1
+
+    for pos, val in zip(positions, sorted_inc):
+        arranged[pos] = val
     return arranged  # list of incremental depths, length = n_steps
 
 def build_scs_type2_hyetograph(storm_dur_min, total_depth_in):
@@ -265,7 +290,9 @@ def build_hyetograph(storm_dur_min, total_depth_in):
 # ---------------------------------------------------------------------------
 
 def write_dss(dss_path, pathname, increments):
-    """Write incremental precipitation time series to DSS file."""
+    """Write incremental precipitation time series to DSS file.
+    Deletes the DSS file on first call to avoid stale data from previous runs.
+    """
     try:
         import pydsstools._lib.x64.core_heclib as cl
         from pydsstools.heclib.dss import HecDss
@@ -275,6 +302,14 @@ def write_dss(dss_path, pathname, increments):
         raise Exception(
             "pydsstools not found. Install with:\n"
             "  pip install pydsstools --break-system-packages")
+
+    # Delete on first call (tracked by module-level flag) so stale pathnames
+    # from previous runs don't persist. Both storms share one DSS file, so
+    # only delete before the first storm is written.
+    if not write_dss._deleted and os.path.isfile(dss_path):
+        os.remove(dss_path)
+        print("  Deleted stale DSS: %s" % os.path.basename(dss_path))
+    write_dss._deleted = True
 
     vals = np.array(increments, dtype=np.float32)
     n = len(vals)
@@ -288,6 +323,8 @@ def write_dss(dss_path, pathname, increments):
     with HecDss.Open(dss_path) as fid:
         fid.put_ts(tsc)
 
+write_dss._deleted = False  # reset flag on script load
+
 # ---------------------------------------------------------------------------
 # --- .met file writer ------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -295,18 +332,9 @@ def write_dss(dss_path, pathname, increments):
 def write_met_file(met_path, model_name, gage_name, subbasin_names):
     """
     Write one .met file for one storm model.
-    Structure (matched exactly to HMS 4.13 output):
-      Meteorology: <model_name>
-        ...
-        Use Basin Model: <HMS_NAME>
-      End:
-      Precip Method Parameters: Specified Average
-        ...
-      End:
-      Subbasin: <name>
-        Gage: <gage_name>
-      End:
-      ...
+    Format matched exactly to HMS 4.13 output for Specified Hyetograph.
+    Note: HMS writes 'Specified Average' in the file even when UI shows
+    'Specified Hyetograph' -- these are the same method in the file format.
     """
     lines = [
         "Meteorology: " + model_name,
@@ -416,21 +444,38 @@ for suffix, dur_min, atlas_key in STORMS:
 
     model_name = "%s_%s" % (HMS_NAME, suffix)
     gage_name  = model_name + "_Gage"
-    met_path   = os.path.join(OUT_DIR, model_name + ".met")
-    gage_path  = os.path.join(OUT_DIR, model_name + ".gage")
+    met_path   = os.path.join(HMS_PROJ_DIR, model_name + ".met")
+    gage_path  = os.path.join(HMS_PROJ_DIR, model_name + ".gage")
 
     # DSS pathname: /A/B/C/D/E/F/
     # A=project, B=gage_name, C=PRECIP-INC, D=date_block, E=interval, F=source
-    dss_pathname = "/%s/%s/PRECIP-INC/%s/6Minute/ATLAS14/" % (
-        HMS_NAME, gage_name, SIM_START_DSS)
+    # D-part is left BLANK so pydsstools auto-splits the series across day
+    # blocks (01Jan2000, 02Jan2000, ...) when it exceeds 240 intervals.
+    # This is required for the 24-hr storm + recession tail which exceeds
+    # one day block. HMS reads the multi-block series seamlessly.
+    dss_pathname = "/%s/%s/PRECIP-INC//6Minute/ATLAS14/" % (
+        HMS_NAME, gage_name)
     dss_filename = HMS_NAME + ".dss"
 
     print("Storm: %-30s  depth=%.2f in  dur=%d min" % (model_name, total_depth, dur_min))
 
     # Build hyetograph
     increments = build_hyetograph(dur_min, total_depth)
-    print("  Hyetograph: %d intervals, total=%.3f in, peak=%.3f in"
-          % (len(increments), sum(increments), max(increments)))
+    real_total = sum(increments)
+    real_peak  = max(increments)
+
+    # Pad with explicit zeros to cover the full control-spec window.
+    # The control spec runs for storm_dur + 50% tail; DSS cells beyond the
+    # storm must be explicit zeros or HMS reads them as "missing" and aborts.
+    # Pad generously to 2x the storm duration (well past any control window).
+    tail_intervals = int((dur_min * 1.5) // 6) + 10   # storm + 50% tail + margin
+    block_intervals = (1440 // 6)                      # one full day block = 240
+    target_intervals = max(tail_intervals, block_intervals)
+    if len(increments) < target_intervals:
+        increments = increments + [0.0] * (target_intervals - len(increments))
+
+    print("  Hyetograph: %d real intervals (padded to %d), total=%.3f in, peak=%.3f in"
+          % (dur_min // 6, len(increments), real_total, real_peak))
 
     # Write DSS
     write_dss(DSS_PATH, dss_pathname, increments)
