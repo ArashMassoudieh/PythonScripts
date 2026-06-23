@@ -76,6 +76,8 @@ PHASE2_STEPS = [
     "compute_tc.py",
     "build_topology.py",
     "write_basin.py",
+    "write_met.py",
+    "write_hms_project.py",
 ]
 
 site_path = os.path.join(ROOT, SITE_DIR)
