@@ -17,7 +17,7 @@
 import os
 import processing
 import numpy as np
-from osgeo import gdal
+from osgeo import gdal, ogr, osr
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature,
     QgsGeometry, QgsPointXY, QgsFields, QgsField, QgsVectorFileWriter,
@@ -157,12 +157,32 @@ for i, feat in enumerate(pts.getFeatures(), start=1):
         "GRASS_REGION_PARAMETER": None, "GRASS_REGION_CELLSIZE_PARAMETER": 0,
         "GRASS_RASTER_FORMAT_OPT": "", "GRASS_RASTER_FORMAT_META": ""})
 
-    processing.run("gdal:polygonize", {
-        "INPUT": wat_ras, "BAND": 1, "FIELD": "DN",
-        "EIGHT_CONNECTEDNESS": False, "OUTPUT": wat_vec})
+    # polygonize via the GDAL Python API directly. The gdal:polygonize
+    # processing wrapper silently fails on some installs (returns success,
+    # writes nothing), so we call gdal.Polygonize() and write the GPKG via OGR.
+    for ext in ("", "-wal", "-shm", "-journal"):
+        if os.path.exists(wat_vec + ext):
+            try: os.remove(wat_vec + ext)
+            except OSError: pass
+    _src = gdal.Open(wat_ras)
+    _band = _src.GetRasterBand(1)
+    _srs = osr.SpatialReference()
+    _srs.ImportFromWkt(_src.GetProjection())
+    _ds = ogr.GetDriverByName("GPKG").CreateDataSource(wat_vec)
+    _lyr = _ds.CreateLayer("wshed", srs=_srs, geom_type=ogr.wkbPolygon)
+    _lyr.CreateField(ogr.FieldDefn("DN", ogr.OFTInteger))
+    gdal.Polygonize(_band, _band.GetMaskBand(), _lyr, 0, [], callback=None)
+    _ds = None
+    _src = None
+
+    poly_layer = QgsVectorLayer(wat_vec + "|layername=wshed",
+                                f"wshed_{safe}_poly", "ogr")
+    if not poly_layer.isValid() or poly_layer.featureCount() == 0:
+        print(f"      WARNING: polygonize produced no polygons for id='{tag}', skipping")
+        continue
 
     sel = processing.run("native:extractbyexpression", {
-        "INPUT": wat_vec, "EXPRESSION": '"DN" = 1', "OUTPUT": "TEMPORARY_OUTPUT"})
+        "INPUT": poly_layer, "EXPRESSION": '"DN" = 1', "OUTPUT": "TEMPORARY_OUTPUT"})
     diss = processing.run("native:dissolve", {
         "INPUT": sel["OUTPUT"], "FIELD": [], "OUTPUT": "TEMPORARY_OUTPUT"})
     processing.run("native:fieldcalculator", {
