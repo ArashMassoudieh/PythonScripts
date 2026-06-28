@@ -41,6 +41,7 @@
 #   exec(open(SCRIPT_DIR + "/ras_build_terrain.py").read())
 # =============================================================================
 import os
+from osgeo import gdal
 import glob
 import math
 import processing
@@ -161,34 +162,28 @@ else:
 # =====================================================================
 # 1-2. MERGE + REPROJECT THE 1 m DEM
 # =====================================================================
-print("\n[1/5] Merging tiles ...")
-merged_raw = processing.run("gdal:merge", {
-    "INPUT": tiles, "PCT": False, "SEPARATE": False,
-    "NODATA_INPUT": None, "NODATA_OUTPUT": NODATA,
-    "OPTIONS": "", "EXTRA": "", "DATA_TYPE": 5,        # Float32
-    "OUTPUT": "TEMPORARY_OUTPUT"})["OUTPUT"]
-m0 = QgsRasterLayer(merged_raw, "merged_raw")
-if not m0.isValid():
-    raise Exception("Merge produced invalid raster.")
-print("    merged native CRS:", m0.crs().authid(),
-      "| size:", m0.width(), "x", m0.height())
-
-print("[2/5] Reprojecting DEM -> %s ..." % target_crs.authid())
-if m0.crs().authid() == target_crs.authid():
-    processing.run("gdal:translate", {
-        "INPUT": merged_raw, "TARGET_CRS": target_crs, "NODATA": NODATA,
-        "DATA_TYPE": 0, "OPTIONS": "", "EXTRA": "", "OUTPUT": MERGED_PATH})
-else:
-    processing.run("gdal:warpreproject", {
-        "INPUT": merged_raw, "SOURCE_CRS": m0.crs(), "TARGET_CRS": target_crs,
-        "RESAMPLING": RESAMPLING, "NODATA": NODATA, "TARGET_RESOLUTION": None,
-        "OPTIONS": "", "DATA_TYPE": 0, "TARGET_EXTENT": None,
-        "TARGET_EXTENT_CRS": None, "MULTITHREADING": False, "EXTRA": "",
-        "OUTPUT": MERGED_PATH})
+print("\n[1-2/5] Merging tiles + reprojecting -> %s (gdal.Warp direct API) ..."
+      % target_crs.authid())
+# The gdal:merge / gdal:warpreproject processing wrappers silently fail on this
+# install (return success, write nothing), so call gdal.Warp() directly. Warp
+# both MERGES the tiles and REPROJECTS to the target CRS in one pass.
+_resample = {0: "near", 1: "bilinear", 2: "cubic"}.get(RESAMPLING, "bilinear")
+if os.path.exists(MERGED_PATH):
+    try: os.remove(MERGED_PATH)
+    except OSError: pass
+_warp = gdal.Warp(
+    MERGED_PATH, tiles, format="GTiff",
+    dstSRS=target_crs.authid(),
+    srcNodata=None, dstNodata=NODATA,
+    outputType=gdal.GDT_Float32,
+    resampleAlg=_resample,
+    creationOptions=["COMPRESS=LZW", "TILED=YES"])
+_warp = None     # flush/close
 merged = QgsRasterLayer(MERGED_PATH, "demhr_merged_utm")
 if not merged.isValid():
-    raise Exception("Reprojected DEM invalid: " + MERGED_PATH)
-print("    wrote", MERGED_PATH, "| size:", merged.width(), "x", merged.height())
+    raise Exception("gdal.Warp merge/reproject produced invalid raster: " + MERGED_PATH)
+print("    wrote", MERGED_PATH, "| size:", merged.width(), "x", merged.height(),
+      "| CRS:", merged.crs().authid())
 
 # =====================================================================
 # 3. TRACE THE SINGLE REACH ALONG THE NHD MAIN STEM

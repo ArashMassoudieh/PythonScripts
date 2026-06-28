@@ -55,8 +55,6 @@ except NameError:
 # ---------------------------------------------------------------------------
 
 PHASE1_STEPS = [
-    "clip_only.py",
-    "fillsink_etc.py",
     "delineate_whole_watershed.py",
     "clip_dem_to_watershed.py",
     "extract_reaches.py",

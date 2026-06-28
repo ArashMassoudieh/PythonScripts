@@ -1,0 +1,18 @@
+project_no,cluster,community,in_floodplain,floodplain_type,wsel_nearby,nearest_study_stream_m,prelim_classification
+AZ12-100,Cottonwood,"Cottonwood, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-116,Cottonwood,"Cottonwood, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+NM15-032,Ojo Amarillo,"Ojo Amarillo Modern, NM",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+NM15-134,Tohajiilee,"Tohajiilee, NM",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+NM15-135,Tohajiilee,"Tohajiilee, NM",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-113,Kayenta,"Kayenta, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-073,Kayenta,"Kayenta, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-139,Tuba City,"Tuba City, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-140,Tuba City,"Tuba City, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-301,Chilchinbeto,"Chilchinbeto, AZ",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+NM15-141,Coyote Canyon,"Coyote Canyon, NM",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+NM15-097,Coyote Canyon,"Coyote Canyon, NM",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-069,Chinle,"Chinle, AZ (65PR)",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-086,Chinle,"Chinle, AZ (50PR)",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-087,Chinle,"Chinle, AZ (50PR)",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-080,Many Farms,"Many Farms, AZ (16PR)",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
+AZ12-186,Many Farms,"Chinle, AZ (4PR)",False,,False,,Outside study coverage -- likely full hydrology/hydraulics (3.5-3.7) required
