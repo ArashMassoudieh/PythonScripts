@@ -60,7 +60,7 @@ POURPTS_NAME  = "pour_points_snapped.gpkg"
 
 PIXEL_M = 9.336
 SNAP_PX = 1.5
-RELOAD_IN_PROJECT = True
+RELOAD_IN_PROJECT = False
 # ---------------------------------------------------------------------------
 
 site_path = os.path.join(ROOT, SITE_DIR)

@@ -30,7 +30,7 @@ import os
 import processing
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer, QgsVectorFileWriter,
-    QgsCoordinateTransformContext,
+    QgsCoordinateTransformContext, NULL,
 )
 
 # --- settings (set ROOT + SITE_DIR ONCE) -----------------------------------
@@ -51,7 +51,7 @@ OUT_LAYER   = "subwatershed_params"
 
 CN_FIELD    = "CN"                           # field to write (1 decimal)
 CN_DECIMALS = 1
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False   # do not auto-load outputs; load manually as needed
 # ---------------------------------------------------------------------------
 
 site_path = os.path.join(ROOT, SITE_DIR)
@@ -64,6 +64,17 @@ print("Site  :", site_path)
 print("Zones :", subws, "(layer %s)" % SUBWS_LAYER)
 print("CN    :", cn_tif)
 print("Out   :", out_path)
+
+# Release any loaded copy of the output up front so it can be overwritten later
+# (a loaded subwatershed_params layer holds the GPKG open on Windows).
+import sys as _sys
+for _sd in ("C:/Users/arash/Dropbox/Chloeta/NHA/PythonScripts",
+            "C:/Users/smnfa/Dropbox/NHA/PythonScripts",
+            "/home/arash/Dropbox/Chloeta/NHA/PythonScripts"):
+    if os.path.isdir(_sd) and _sd not in _sys.path:
+        _sys.path.insert(0, _sd)
+from ws3io import release_and_delete
+release_and_delete(out_path)
 
 for p in (subws, cn_tif):
     if not os.path.isfile(p):
@@ -101,8 +112,7 @@ fields.append(QgsField("id", QVariant.Int))
 fields.append(QgsField("area_km2", QVariant.Double))
 fields.append(QgsField(CN_FIELD, QVariant.Double))
 
-if os.path.exists(out_path):
-    os.remove(out_path)
+release_and_delete(out_path)              # lock-safe overwrite (layer/Dropbox/GPKG)
 opts = QgsVectorFileWriter.SaveVectorOptions()
 opts.driverName = "GPKG"
 opts.layerName  = OUT_LAYER
@@ -112,16 +122,20 @@ writer = QgsVectorFileWriter.create(
 
 n = 0
 missing = []
+
+def _null(v):
+    return v is None or v == NULL
+
 for ft in zonal.getFeatures():
     mean = ft[mean_field]
     fid  = ft["id"] if "id" in zonal.fields().names() else n + 1
     area = ft["area_km2"] if "area_km2" in zonal.fields().names() else None
     of = QgsFeature(fields)
     of.setGeometry(ft.geometry())
-    of["id"] = int(fid) if fid is not None else n + 1
-    if area is not None:
+    of["id"] = int(fid) if not _null(fid) else n + 1
+    if not _null(area):
         of["area_km2"] = float(area)
-    if mean is None:
+    if _null(mean):
         of[CN_FIELD] = None
         missing.append(of["id"])
     else:
@@ -133,12 +147,18 @@ del writer
 print("\nWrote %d subwatershed(s) -> %s" % (n, OUT_NAME))
 print("\n  id    area_km2     CN")
 out_lyr = QgsVectorLayer(out_path + "|layername=" + OUT_LAYER, OUT_LAYER, "ogr")
-for ft in sorted(out_lyr.getFeatures(), key=lambda f: (f["id"] is None, f["id"])):
+
+def _isnull(v):
+    return v is None or v == NULL
+
+for ft in sorted(out_lyr.getFeatures(),
+                 key=lambda f: (_isnull(f["id"]),
+                                f["id"] if not _isnull(f["id"]) else -1)):
     a = ft["area_km2"]; cn = ft[CN_FIELD]
     print("  %-4s  %9s  %5s" % (
-        ft["id"],
-        ("%.4f" % a) if a is not None else "-",
-        ("%.1f" % cn) if cn is not None else "NULL"))
+        ft["id"] if not _isnull(ft["id"]) else "-",
+        ("%.4f" % float(a)) if not _isnull(a) else "-",
+        ("%.1f" % float(cn)) if not _isnull(cn) else "NULL"))
 
 if missing:
     print("\n*** subwatershed(s) with NULL CN (no classified cells inside):", missing)

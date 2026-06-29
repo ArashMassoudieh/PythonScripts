@@ -1,92 +1,67 @@
-# =============================================================================
-# Clip vector layers to a DEM's extent, handling CRS mismatches correctly.
-# NO raster merge. Reads the DEM by file path only to get its extent and CRS,
-# reprojects each vector INTO the DEM's CRS, then clips.
-#
-# All generated files go to <SITE>/outputs/ . Intermediates go to
-# <SITE>/outputs/temp/ so they are easy to delete later.
-#
-# Run from: QGIS -> Plugins -> Python Console.
-# =============================================================================
-import os
-import processing
+import os, processing
 from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer
 
-# --- settings (set the two paths ONCE) -------------------------------------
-try:
-    ROOT
-except NameError:
-    ROOT = "C:/Users/smnfa/Dropbox/NHA/"
-try:
-    SITE_DIR
-except NameError:
-    SITE_DIR = "WS3_GIS/AZ12-100"
-
-DEM_REL  = "demlr/cliped_utm.tif"        # DEM, relative to the site folder
-CLIP_SUFFIX = "_clip"
-USE_VISIBLE_ONLY = True                  # only clip ticked vector layers
-# ---------------------------------------------------------------------------
-
-# --- derived paths ---------------------------------------------------------
-site_path = os.path.join(ROOT, SITE_DIR)
-DEM_PATH  = os.path.join(site_path, DEM_REL)
-OUT_DIR   = os.path.join(site_path, "outputs")
-TEMP_DIR  = os.path.join(OUT_DIR, "temp")
+DEM_PATH = os.path.join(ROOT, SITE_DIR, "demlr/cliped_utm.tif")
+OUT_DIR  = os.path.join(ROOT, SITE_DIR, "outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
-os.makedirs(TEMP_DIR, exist_ok=True)
 
-project = QgsProject.instance()
-root = project.layerTreeRoot()
+# --- shared lock-safe overwrite helper (same one your pipeline uses) ---
+import sys as _sys
+for _sd in ("C:/Users/arash/Dropbox/Chloeta/NHA/PythonScripts",
+            "C:/Users/smnfa/Dropbox/NHA/PythonScripts",
+            "/home/arash/Dropbox/Chloeta/NHA/PythonScripts"):
+    if os.path.isdir(_sd) and _sd not in _sys.path:
+        _sys.path.insert(0, _sd)
+from ws3io import release_and_delete
 
 dem = QgsRasterLayer(DEM_PATH, "ref_dem")
 if not dem.isValid():
-    raise Exception("DEM invalid / not found: " + DEM_PATH)
+    raise Exception("DEM invalid: " + DEM_PATH)
 dem_crs = dem.crs()
-dem_ext = dem.extent()
-print("Root      :", ROOT)
-print("Site      :", site_path)
-print("DEM       :", DEM_PATH)
-print("Outputs   :", OUT_DIR)
-print("  DEM CRS :", dem_crs.authid())
-print("  DEM size:", dem.width(), "x", dem.height())
+e = dem.extent()
+extent_str = "%f,%f,%f,%f [%s]" % (e.xMinimum(), e.xMaximum(),
+                                   e.yMinimum(), e.yMaximum(), dem_crs.authid())
+print("DEM CRS:", dem_crs.authid(), "\n")
 
-def is_visible(layer):
-    node = root.findLayer(layer.id())
-    return node is not None and node.isVisible()
+# snapshot vector layers up front; skip already-clipped outputs so re-runs
+# don't re-clip their own results
+vectors = [l for l in QgsProject.instance().mapLayers().values()
+           if isinstance(l, QgsVectorLayer) and not l.name().endswith("_clip")]
+print("Found %d vector layer(s).\n" % len(vectors))
 
-vectors = []
-for lyr in project.mapLayers().values():
-    if isinstance(lyr, QgsVectorLayer):
-        if USE_VISIBLE_ONLY and not is_visible(lyr):
-            continue
-        vectors.append(lyr)
-
-print(f"\nClipping {len(vectors)} vector layer(s) to the DEM extent "
-      f"(reprojecting each into {dem_crs.authid()})...")
+results = []
+to_load = []
 for v in vectors:
-    print(f"\n- {v.name()}   (source CRS {v.crs().authid()})")
-    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in v.name())
-    out_path = os.path.join(OUT_DIR, f"{safe}{CLIP_SUFFIX}.gpkg")
+    name = v.name()
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    out = os.path.join(OUT_DIR, safe + "_clip.gpkg")
     try:
-        src = v.source()
-        if v.crs().authid() != dem_crs.authid():
-            print(f"    reprojecting {v.crs().authid()} -> {dem_crs.authid()}")
-            rep = processing.run("native:reprojectlayer", {
-                "INPUT": src, "TARGET_CRS": dem_crs, "OUTPUT": "TEMPORARY_OUTPUT"})
-            src = rep["OUTPUT"]
-        else:
-            print("    CRS already matches DEM")
-        extent_str = (f"{dem_ext.xMinimum()},{dem_ext.xMaximum()},"
-                      f"{dem_ext.yMinimum()},{dem_ext.yMaximum()} [{dem_crs.authid()}]")
-        clip = processing.run("native:extractbyextent", {
-            "INPUT": src, "EXTENT": extent_str, "CLIP": True, "OUTPUT": out_path})
-        cl = QgsVectorLayer(clip["OUTPUT"], f"{v.name()}{CLIP_SUFFIX}", "ogr")
+        # release any loaded layer pointing at this output + delete it (lock-safe)
+        release_and_delete(out)
+        src = v
+        reproj = v.crs() != dem_crs
+        if reproj:
+            src = processing.run("native:reprojectlayer", {
+                "INPUT": v, "TARGET_CRS": dem_crs,
+                "OUTPUT": "TEMPORARY_OUTPUT"})["OUTPUT"]
+        res = processing.run("native:extractbyextent", {
+            "INPUT": src, "EXTENT": extent_str, "CLIP": True, "OUTPUT": out})
+        cl = QgsVectorLayer(res["OUTPUT"], name + "_clip", "ogr")
+        n = cl.featureCount() if cl.isValid() else -1
+        print("  %-30s -> %d features  (%s)" % (name, n,
+              "reprojected" if reproj else "CRS ok"))
+        results.append((name, n))
         if cl.isValid():
-            project.addMapLayer(cl)
-            print(f"    -> {out_path}  ({cl.featureCount()} features)")
-        else:
-            print(f"    WARNING: output invalid for {v.name()}")
+            to_load.append(cl)
     except Exception as ex:
-        print(f"    ERROR clipping {v.name()}: {ex}")
+        print("  %-30s -> ERROR: %s" % (name, ex))
+        results.append((name, -1))
 
-print("\nDone. Clipped vectors in:", OUT_DIR)
+# add all clipped layers to the project at the end
+for cl in to_load:
+    QgsProject.instance().addMapLayer(cl)
+
+print("\n--- summary ---")
+for n, c in results:
+    print("  %-30s %s" % (n, c if c >= 0 else "FAILED"))
+print("\nClipped layers written to %s and added to the project." % OUT_DIR)

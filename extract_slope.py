@@ -34,7 +34,7 @@
 import os
 import processing
 from osgeo import gdal
-from qgis.core import QgsProject, QgsVectorLayer
+from qgis.core import QgsProject, QgsVectorLayer, NULL
 from qgis.PyQt.QtCore import QVariant
 gdal.UseExceptions()
 
@@ -54,8 +54,12 @@ PARAMS_LAYER = "subwatershed_params"
 SLOPE_FIELD = "slope_pct"          # average basin slope, percent
 CX_FIELD    = "centroid_x"         # point-on-surface easting  (layer CRS, m)
 CY_FIELD    = "centroid_y"         # point-on-surface northing (layer CRS, m)
-RELOAD_IN_PROJECT = True
+RELOAD_IN_PROJECT = False
 # ---------------------------------------------------------------------------
+
+# treat both Python None and QGIS QVariant-null as null
+def _null(v):
+    return v is None or v == NULL
 
 site_path = os.path.join(ROOT, SITE_DIR)
 OUT_DIR   = os.path.join(site_path, "outputs")
@@ -125,7 +129,7 @@ for ft in layer.getFeatures():
     # slope
     val = slope_by_id.get(ft["id"])
     layer.changeAttributeValue(ft.id(), idx_slope,
-                               round(float(val), 3) if val is not None else None)
+                               round(float(val), 3) if not _null(val) else None)
     # centroid (point-on-surface, guaranteed inside the polygon)
     geom = ft.geometry()
     pos = geom.pointOnSurface()        # QgsGeometry (point)
@@ -142,18 +146,21 @@ layer.commitChanges()
 print("\nUpdated %s with %s, %s, %s:" % (PARAMS_NAME, SLOPE_FIELD, CX_FIELD, CY_FIELD))
 print("\n  id    area_km2     CN   slope_pct      centroid_x     centroid_y")
 layer2 = QgsVectorLayer(params + "|layername=" + PARAMS_LAYER, PARAMS_LAYER, "ogr")
-for ft in sorted(layer2.getFeatures(), key=lambda f: (f["id"] is None, f["id"])):
+for ft in sorted(layer2.getFeatures(),
+                 key=lambda f: (_null(f["id"]),
+                                f["id"] if not _null(f["id"]) else -1)):
     cn = ft["CN"] if "CN" in layer2.fields().names() else None
     sp = ft[SLOPE_FIELD]
     cx = ft[CX_FIELD]
     cy = ft[CY_FIELD]
+    a  = ft["area_km2"]
     print("  %-4s  %9s  %5s   %7s   %12s  %12s" % (
-        ft["id"],
-        ("%.4f" % ft["area_km2"]) if ft["area_km2"] is not None else "-",
-        ("%.1f" % cn) if cn is not None else "-",
-        ("%.3f" % sp) if sp is not None else "NULL",
-        ("%.2f" % cx) if cx is not None else "NULL",
-        ("%.2f" % cy) if cy is not None else "NULL"))
+        ft["id"] if not _null(ft["id"]) else "-",
+        ("%.4f" % float(a)) if not _null(a) else "-",
+        ("%.1f" % float(cn)) if not _null(cn) else "-",
+        ("%.3f" % float(sp)) if not _null(sp) else "NULL",
+        ("%.2f" % float(cx)) if not _null(cx) else "NULL",
+        ("%.2f" % float(cy)) if not _null(cy) else "NULL"))
 
 if RELOAD_IN_PROJECT:
     QgsProject.instance().addMapLayer(layer2)

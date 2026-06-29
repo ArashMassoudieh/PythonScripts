@@ -335,7 +335,7 @@ for model_name, _, __ in met_models:
     from datetime import timedelta, datetime as dt
     start = dt(2000, 1, 1, 0, 0)
     end   = start + timedelta(minutes=tail_min)
-    end_str = end.strftime("%-d %B %Y, %H:%M")
+    end_str = "%d %s" % (end.day, end.strftime("%B %Y, %H:%M"))
 
     gage_lines += [
         "Gage: " + gage_name,

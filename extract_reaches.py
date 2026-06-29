@@ -45,6 +45,15 @@ from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer, QgsApplication
 )
 
+# shared lock-safe overwrite helper (clears a loaded layer + deletes file/sidecars)
+import sys as _sys
+for _sd in ("C:/Users/arash/Dropbox/Chloeta/NHA/PythonScripts",
+            "C:/Users/smnfa/Dropbox/NHA/PythonScripts",
+            "/home/arash/Dropbox/Chloeta/NHA/PythonScripts"):
+    if os.path.isdir(_sd) and _sd not in _sys.path:
+        _sys.path.insert(0, _sd)
+from ws3io import release_and_delete
+
 # --- settings (set ROOT + SITE_DIR ONCE) -----------------------------------
 try:
     ROOT
@@ -79,7 +88,7 @@ SIDE_SLOPE_Z  = 2.0             # horizontal:vertical (z H per 1 V)
 MANNING_N     = 0.035           # ephemeral natural channel; document source
 SLOPE_FLOOR   = 0.0005          # min reach slope, avoids zero/negative
 
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False   # do not auto-load; a loaded layer locks reaches.gpkg next run
 # ---------------------------------------------------------------------------
 
 # --- derived paths ---------------------------------------------------------
@@ -135,6 +144,7 @@ print(f"  -> A_crit = {a_crit_km2:.4f} km^2 -> threshold = {threshold_cells} cel
 #   the carved DEM for tie-breaking the trace direction.
 acc_abs = os.path.join(TEMP_DIR, "flow_acc_abs.tif")
 print("Building |flow_acc| ...")
+release_and_delete(acc_abs)   # lock-safe: clear any prior/loaded temp raster
 ds = gdal.Open(FLOWACC_PATH)
 gt, proj = ds.GetGeoTransform(), ds.GetProjection()
 arr = np.abs(ds.GetRasterBand(1).ReadAsArray().astype("float64"))
@@ -246,6 +256,7 @@ reaches_lyr.commitChanges()
 
 # --- write reaches.gpkg with CRS explicitly stamped ------------------------
 print("Writing", REACHES_OUT, "...")
+release_and_delete(REACHES_OUT)   # lock-safe: clear any existing/loaded reaches.gpkg first
 processing.run("native:assignprojection", {
     "INPUT": reaches_lyr, "CRS": crs, "OUTPUT": REACHES_OUT})
 

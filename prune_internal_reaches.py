@@ -74,7 +74,7 @@ JUNC_LAYER   = "junctions"
 
 PIXEL_M = 9.336
 SNAP_PX = 1.5
-RELOAD_IN_PROJECT = True
+RELOAD_IN_PROJECT = False
 WRITE_AUDIT = True            # write pruned_reaches/junctions for inspection
 # ---------------------------------------------------------------------------
 

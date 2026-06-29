@@ -26,9 +26,18 @@
 # =============================================================================
 import os
 import csv
+import sys
 from osgeo import gdal
 from qgis.core import QgsProject, QgsRasterLayer
 gdal.UseExceptions()
+
+# shared helpers (release_and_delete handles Windows/Dropbox file locks)
+for _sd in ("C:/Users/arash/Dropbox/Chloeta/NHA/PythonScripts",
+            "C:/Users/smnfa/Dropbox/NHA/PythonScripts",
+            "/home/arash/Dropbox/Chloeta/NHA/PythonScripts"):
+    if os.path.isdir(_sd) and _sd not in sys.path:
+        sys.path.insert(0, _sd)
+from ws3io import release_and_delete
 
 # --- settings (set ROOT + SITE_DIR ONCE) -----------------------------------
 try:
@@ -50,7 +59,7 @@ OUT_NAME = "cn.tif"
 
 NODATA   = 255                    # CN output nodata
 HSG_LETTER = {1: "A", 2: "B", 3: "C", 4: "D"}
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False            # do not auto-load; load manually as needed
 # ---------------------------------------------------------------------------
 
 cond = HYDRO_CONDITION.strip().lower()
@@ -100,8 +109,7 @@ hsg_nd = hsg_b.GetNoDataValue()
 
 # --- create output ----------------------------------------------------------
 drv = gdal.GetDriverByName("GTiff")
-if os.path.exists(out_path):
-    os.remove(out_path)
+release_and_delete(out_path)              # lock-safe overwrite (layer/Dropbox)
 out_ds = drv.Create(out_path, nx, ny, 1, gdal.GDT_Byte, options=["COMPRESS=LZW"])
 out_ds.SetGeoTransform(lc_ds.GetGeoTransform())
 out_ds.SetProjection(lc_ds.GetProjection())

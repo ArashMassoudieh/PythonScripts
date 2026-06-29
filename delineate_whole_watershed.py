@@ -59,13 +59,61 @@ SNAP_CELLS = 2                    # half-window (cells) to snap onto highest |fl
                                   # the single outlet can use a slightly larger window
                                   # than the interior pour points (no confluence risk)
 FALLBACK_EPSG = 26912             # only if the flow-dir grid somehow lacks a CRS
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False   # do not auto-load; loaded layers lock the gpkg next run
 # ---------------------------------------------------------------------------
 
 site_path = os.path.join(ROOT, SITE_DIR)
 OUT_DIR   = os.path.join(site_path, "outputs")
 TEMP_DIR  = os.path.join(OUT_DIR, "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+# shared lock-safe overwrite helper
+import sys as _sys
+for _sd in ("C:/Users/arash/Dropbox/Chloeta/NHA/PythonScripts",
+            "C:/Users/smnfa/Dropbox/NHA/PythonScripts",
+            "/home/arash/Dropbox/Chloeta/NHA/PythonScripts"):
+    if os.path.isdir(_sd) and _sd not in _sys.path:
+        _sys.path.insert(0, _sd)
+from ws3io import release_and_delete
+
+
+def _wipe_temp_dir(tdir):
+    """Clear scratch files from temp/ at startup so a prior run's leftover (or a
+    locked whole_wshed.gpkg) can never collide. Release loaded layers first."""
+    import time
+    try:
+        proj = QgsProject.instance()
+        tnorm = os.path.normcase(os.path.abspath(tdir))
+        for lyr in list(proj.mapLayers().values()):
+            try:
+                src = os.path.normcase(os.path.abspath(lyr.source().split("|")[0]))
+                if src.startswith(tnorm):
+                    proj.removeMapLayer(lyr.id())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not os.path.isdir(tdir):
+        return
+    for _ in range(8):
+        leftover = [os.path.join(tdir, f) for f in os.listdir(tdir)]
+        if not leftover:
+            return
+        for p in leftover:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        if not os.listdir(tdir):
+            return
+        time.sleep(1.0)
+    if os.listdir(tdir):
+        raise Exception(
+            "temp/ still holds locked file(s): %s\nRestart QGIS to release "
+            "handles from a crashed run, then re-run." % ", ".join(os.listdir(tdir)[:5]))
+
+
+_wipe_temp_dir(TEMP_DIR)
 
 OUTLET_PATH  = os.path.join(OUT_DIR, OUTLET_REL)
 FLOWDIR_PATH = os.path.join(OUT_DIR, FLOWDIR_REL)
@@ -156,10 +204,7 @@ processing.run(grass_id("r.water.outlet"), {
 # polygonize via the GDAL Python API directly. The gdal:polygonize processing
 # wrapper silently fails on this install (returns success, writes nothing), so
 # we call gdal.Polygonize() and write the GPKG via OGR.
-for ext in ("", "-wal", "-shm", "-journal"):
-    if os.path.exists(wat_vec + ext):
-        try: os.remove(wat_vec + ext)
-        except OSError: pass
+release_and_delete(wat_vec)
 _src = gdal.Open(wat_ras)
 _band = _src.GetRasterBand(1)
 _srs = osr.SpatialReference()
@@ -192,25 +237,7 @@ print("Whole-watershed area: %.4f km2" % area_km2)
 
 # release any loaded boundary layer + delete the file (Windows lock-safe)
 proj = QgsProject.instance()
-for lyr in list(proj.mapLayers().values()):
-    if "watershed_boundary" in lyr.source().lower():
-        proj.removeMapLayer(lyr.id())
-if os.path.exists(BOUNDARY_OUT):
-    deleted = False
-    try:
-        ok, _ = QgsVectorFileWriter.deleteSilently(BOUNDARY_OUT)
-        deleted = ok
-    except AttributeError:
-        pass
-    if not deleted:
-        for ext in ("", "-wal", "-shm", "-journal"):
-            p = BOUNDARY_OUT + ext
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except PermissionError:
-                    raise Exception("Cannot overwrite %s -- remove the "
-                                    "'watershed_boundary' layer and re-run." % p)
+release_and_delete(BOUNDARY_OUT)
 
 fields = QgsFields()
 fields.append(QgsField("id", QVariant.Int))
@@ -249,12 +276,7 @@ print("watershed_boundary.gpkg written WITH CRS", chk_authid)
 sfields = QgsFields()
 sfields.append(QgsField("id", QVariant.Int))
 if os.path.exists(SNAPPED_OUT):
-    try:
-        QgsVectorFileWriter.deleteSilently(SNAPPED_OUT)
-    except AttributeError:
-        for ext in ("", "-wal", "-shm", "-journal"):
-            if os.path.exists(SNAPPED_OUT + ext):
-                os.remove(SNAPPED_OUT + ext)
+    release_and_delete(SNAPPED_OUT)
 sopts = QgsVectorFileWriter.SaveVectorOptions()
 sopts.driverName = "GPKG"
 sopts.layerName = "outlet_snapped"

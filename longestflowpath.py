@@ -27,13 +27,43 @@
 #
 # Run from: QGIS -> Plugins -> Python Console.
 # =============================================================================
-import os, math, struct
-from osgeo import gdal
+import os, math, struct, time
+import numpy as np
+from osgeo import gdal, ogr
 from qgis.core import (QgsProject, QgsVectorLayer, QgsField, QgsFields,
                        QgsFeature, QgsGeometry, QgsPointXY, QgsVectorFileWriter,
-                       QgsCoordinateTransformContext, QgsWkbTypes)
+                       QgsCoordinateTransformContext, QgsWkbTypes, NULL)
 from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtWidgets import QApplication
 gdal.UseExceptions()
+
+# treat Python None and QGIS QVariant-null alike
+def _null(v):
+    return v is None or v == NULL
+
+# --- time / cancel guards ----------------------------------------------------
+# MAX_TOTAL_SEC: whole-script budget; MAX_PER_SW_SEC: per-subwatershed budget.
+# Either being exceeded makes the script give up GRACEFULLY (writes whatever it
+# finished, marks the rest NULL) instead of hanging. Set to None to disable.
+MAX_TOTAL_SEC  = 600     # 10 min for the whole site; raise for very large sites
+MAX_PER_SW_SEC = 90      # 90 s per subwatershed before it bails on that one
+
+class _Timeout(Exception):
+    pass
+
+def _check_stop(stop_file, counter, t_start_total, t_start_sw, every=2000):
+    """Pump events (keeps QGIS responsive + stop button alive), honour the STOP
+    file, and enforce the time budgets. Raises _Timeout/Exception to unwind."""
+    if counter % every:
+        return
+    QApplication.processEvents()
+    if os.path.exists(stop_file):
+        raise Exception("Aborted by STOP file (%s). Delete it to re-run." % stop_file)
+    now = time.time()
+    if MAX_TOTAL_SEC is not None and (now - t_start_total) > MAX_TOTAL_SEC:
+        raise Exception("Total time budget (%ss) exceeded; giving up." % MAX_TOTAL_SEC)
+    if MAX_PER_SW_SEC is not None and (now - t_start_sw) > MAX_PER_SW_SEC:
+        raise _Timeout()    # per-subwatershed only: skip this one, keep going
 
 # --- settings (set ROOT + SITE_DIR ONCE) -----------------------------------
 try:
@@ -53,7 +83,7 @@ PARAMS_NAME  = "subwatershed_params.gpkg";    PARAMS_LAYER = "subwatershed_param
 LFP_NAME     = "longest_flow_paths.gpkg";     LFP_LAYER    = "longest_flow_paths"
 
 M_TO_FT = 3.280839895
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False   # do not auto-load outputs; load manually as needed
 # ---------------------------------------------------------------------------
 
 # GRASS r.watershed direction -> (drow, dcol). Row increases southward.
@@ -74,15 +104,19 @@ for p in (fd_path, dem_path, subws_path, pour_path, params):
     if not os.path.isfile(p):
         raise Exception("not found: " + p)
 
-# --- read flow_dir + dem into row lists, capture geotransform --------------
+# --- read flow_dir + dem as numpy arrays, capture geotransform ------------
 fdds = gdal.Open(fd_path); fdb = fdds.GetRasterBand(1)
 gt = fdds.GetGeoTransform(); proj = fdds.GetProjection()
 NX, NY = fdds.RasterXSize, fdds.RasterYSize
 px, py = gt[1], -gt[5]                      # pixel sizes (m), py>0
-FD = [list(struct.unpack("%dh" % NX, fdb.ReadRaster(0, r, NX, 1))) for r in range(NY)]
+FD = fdb.ReadAsArray().astype(np.int16)     # FD[r, c]
 demds = gdal.Open(dem_path); demb = demds.GetRasterBand(1)
-DEM = [list(struct.unpack("%df" % NX, demb.ReadRaster(0, r, NX, 1))) for r in range(NY)]
+DEM = demb.ReadAsArray().astype(np.float64) # DEM[r, c]
 print("Grid : %d x %d  pixel %.3f m" % (NX, NY, px))
+
+STOP_FILE = os.path.join(OUT, "STOP")
+if os.path.exists(STOP_FILE):
+    os.remove(STOP_FILE)                    # clear any stale stop file
 
 ortho = (px + py) / 2.0
 diag  = ortho * math.sqrt(2)
@@ -113,6 +147,94 @@ def trace(r, c):
             break
     return path
 
+
+def longest_path_to_outlet(in_sw, o_r, o_c):
+    """Fast longest-flow-path within a subwatershed mask `in_sw` (bool array),
+    draining to outlet (o_r,o_c).
+
+    Strategy: for every in-mask cell, walk downstream (confined to the mask)
+    until we reach the outlet, accumulating distance -- but MEMOIZE the
+    distance-to-outlet so each cell is resolved once (near-linear overall).
+    The path-length to outlet is then known for all cells; the longest flow
+    path starts at the cell with the greatest distance-to-outlet. We trace that
+    single cell to build the geometry. No per-headwater tracing, no list scans.
+    """
+    DIST = {}                        # (r,c) -> distance downstream to outlet (m)
+    NEXT = {}                        # (r,c) -> next downstream (r,c) or None
+    outlet = (o_r, o_c)
+
+    def step(r, c):
+        code = abs(int(FD[r][c]))
+        off = GRASS_OFF.get(code)
+        if off is None:
+            return None
+        nr, nc = r + off[0], c + off[1]
+        if not (0 <= nr < NY and 0 <= nc < NX):
+            return None
+        if not in_sw[nr, nc]:        # leaving the subwatershed
+            return None
+        seg = diag if (off[0] != 0 and off[1] != 0) else ortho
+        return nr, nc, seg
+
+    def dist_to_outlet(r, c):
+        # iterative walk with on-stack cycle guard; memoized.
+        stack = []
+        cur = (r, c)
+        guard = set()
+        while cur not in DIST:
+            if cur == outlet:
+                DIST[cur] = 0.0
+                break
+            if cur in guard:         # routing loop -> treat as unreachable
+                for s in stack:
+                    DIST[s] = None
+                DIST[cur] = None
+                break
+            guard.add(cur)
+            s = step(*cur)
+            if s is None:            # ran off mask/edge before hitting outlet
+                DIST[cur] = None     # this cell does not drain to the outlet
+                break
+            nr, nc, seg = s
+            NEXT[cur] = (nr, nc, seg)
+            stack.append(cur)
+            cur = (nr, nc)
+        # unwind the stack, assigning cumulative distances
+        base = DIST.get(cur)
+        while stack:
+            s = stack.pop()
+            nxt = NEXT.get(s)
+            if base is None or nxt is None:
+                DIST[s] = None
+                base = None
+            else:
+                base = base + nxt[2]
+                DIST[s] = base
+        return DIST[(r, c)]
+
+    rs, cs = np.where(in_sw)
+    best_d = -1.0; best_cell = None
+    cnt = 0
+    for r, c in zip(rs.tolist(), cs.tolist()):
+        cnt += 1
+        _check_stop(STOP_FILE, cnt, _t_total_ref[0], _t_sw_ref[0], every=20000)
+        d = dist_to_outlet(r, c)
+        if d is not None and d > best_d:
+            best_d = d; best_cell = (r, c)
+
+    if best_cell is None or best_d <= 0:
+        return None, 0.0
+    # build the path geometry by walking from best_cell to outlet
+    path = [best_cell]
+    cur = best_cell
+    while cur != outlet:
+        nxt = NEXT.get(cur)
+        if nxt is None:
+            break
+        cur = (nxt[0], nxt[1])
+        path.append(cur)
+    return path, best_d
+
 def cumdist(path):
     d = [0.0]
     for (r0, c0), (r1, c1) in zip(path, path[1:]):
@@ -142,43 +264,93 @@ if not (subws.isValid() and pour.isValid()):
 pour_pts = [f.geometry().asPoint() for f in pour.getFeatures()
             if not f.geometry().isEmpty()]
 
+# --- rasterize subwatershed ids onto the flow-dir grid (one GEOS pass, not
+# millions). ID[r,c] = subwatershed id, or -1 outside. Replaces the per-cell
+# geom.contains() that made this O(cells x boundary-complexity). --------------
+_mem = gdal.GetDriverByName("MEM").Create("", NX, NY, 1, gdal.GDT_Int32)
+_mem.SetGeoTransform(gt); _mem.SetProjection(proj)
+_mb = _mem.GetRasterBand(1); _mb.SetNoDataValue(-1); _mb.Fill(-1)
+_ogr = ogr.Open(subws_path)
+_olyr = _ogr.GetLayerByName(SUBWS_LAYER) if _ogr.GetLayerByName(SUBWS_LAYER) else _ogr.GetLayer(0)
+gdal.RasterizeLayer(_mem, [1], _olyr, options=["ATTRIBUTE=id"])
+ID = _mb.ReadAsArray()
+_mem = None; _ogr = None
+print("Rasterized subwatershed mask:", int((ID >= 0).sum()), "cells inside basins")
+
+# --- precompute headwater cells: a cell is a headwater if NO in-mask neighbor
+# drains INTO it. The longest path to an outlet always starts at a headwater,
+# so we trace only from these (orders of magnitude fewer starts than all cells).
+# Build "drains-into" by walking each cell's downstream neighbor and marking it.
+has_upstream = np.zeros((NY, NX), dtype=bool)
+for code, (dr, dc) in GRASS_OFF.items():
+    # cells whose FD == code send flow to (r+dr, c+dc); mark those targets
+    src = (np.abs(FD) == code)
+    if not src.any():
+        continue
+    rs, cs = np.where(src)
+    tr, tc = rs + dr, cs + dc
+    valid = (tr >= 0) & (tr < NY) & (tc >= 0) & (tc < NX)
+    has_upstream[tr[valid], tc[valid]] = True
+IS_HEADWATER = ~has_upstream
+
 # --- per-subwatershed longest flow path ------------------------------------
 results = {}            # id -> dict of params
 lines   = {}            # id -> list of (x,y) for the path line
 
+_t_total = time.time()
+_t_total_ref = [_t_total]     # mutable holders so _check_stop sees them
+_t_sw_ref = [time.time()]
+_timed_out_ids = []
+_total_budget_hit = False
+
 for sw in subws.getFeatures():
     sid = int(sw["id"])
-    geom = sw.geometry()
-    # outlet = the snapped pour point inside this subwatershed
-    outlet = None
-    for p in pour_pts:
-        if geom.contains(QgsGeometry.fromPointXY(p)):
-            outlet = p; break
-    if outlet is None:                       # fallback: nearest pour point
-        outlet = min(pour_pts, key=lambda p: geom.distance(QgsGeometry.fromPointXY(p)))
-    o_r, o_c = to_rc(outlet.x(), outlet.y())
+    _t_sw_ref[0] = time.time()
+    try:
+        geom = sw.geometry()
+        # outlet = the snapped pour point inside this subwatershed
+        outlet = None
+        for p in pour_pts:
+            if geom.contains(QgsGeometry.fromPointXY(p)):
+                outlet = p; break
+        if outlet is None:                       # fallback: nearest pour point
+            outlet = min(pour_pts, key=lambda p: geom.distance(QgsGeometry.fromPointXY(p)))
+        o_r, o_c = to_rc(outlet.x(), outlet.y())
 
-    # cells of this subwatershed (rasterize the polygon footprint by point test
-    # is slow; instead bound by the polygon bbox then test containment)
-    bb = geom.boundingBox()
-    r0, c0 = to_rc(bb.xMinimum(), bb.yMaximum())
-    r1, c1 = to_rc(bb.xMaximum(), bb.yMinimum())
-    r0, r1 = max(0, min(r0, r1)), min(NY - 1, max(r0, r1))
-    c0, c1 = max(0, min(c0, c1)), min(NX - 1, max(c0, c1))
+        in_sw = (ID == sid)
+        # snap outlet to nearest in-mask cell if it landed just outside
+        if not (0 <= o_r < NY and 0 <= o_c < NX) or not in_sw[o_r, o_c]:
+            rs_, cs_ = np.where(in_sw)
+            if len(rs_):
+                k = int(np.argmin((rs_ - o_r) ** 2 + (cs_ - o_c) ** 2))
+                o_r, o_c = int(rs_[k]), int(cs_[k])
 
-    best_path = None; best_len = -1.0
-    for rr in range(r0, r1 + 1):
-        for cc in range(c0, c1 + 1):
-            x, y = to_xy(rr, cc)
-            if not geom.contains(QgsGeometry.fromPointXY(QgsPointXY(x, y))):
-                continue
-            path = trace(rr, cc)
-            # keep only the portion up to the outlet if the outlet is on the path
-            if (o_r, o_c) in path:
-                path = path[:path.index((o_r, o_c)) + 1]
-            dd = cumdist(path); L = dd[-1]
-            if L > best_len:
-                best_len = L; best_path = path
+        best_path, best_len = longest_path_to_outlet(in_sw, o_r, o_c)
+
+    except _Timeout:
+        print("  id %s: per-subwatershed time budget hit -> NULL, skipping." % sid)
+        _timed_out_ids.append(sid)
+        results[sid] = dict(flow_len_ft=None, elev_max_ft=None, elev_min_ft=None,
+                            slope_lfp=None, slope_1085=None)
+        continue
+    except Exception as ex:
+        print("  STOPPING:", ex)
+        _total_budget_hit = True
+        break
+
+    except _Timeout:
+        # this subwatershed took too long: record NULL, move on to the next.
+        print("  id %s: per-subwatershed time budget hit -> NULL, skipping." % sid)
+        _timed_out_ids.append(sid)
+        results[sid] = dict(flow_len_ft=None, elev_max_ft=None, elev_min_ft=None,
+                            slope_lfp=None, slope_1085=None)
+        continue
+    except Exception as ex:
+        # total budget or STOP file: stop processing further subwatersheds but
+        # keep what we have and fall through to writing outputs.
+        print("  STOPPING:", ex)
+        _total_budget_hit = True
+        break
 
     if not best_path or best_len <= 0:
         results[sid] = dict(flow_len_ft=None, elev_max_ft=None, elev_min_ft=None,
@@ -202,6 +374,11 @@ for sw in subws.getFeatures():
           (sid, L_ft, 100 * slp, 100 * s1085))
 
 # --- write the flow-path line layer ----------------------------------------
+if _total_budget_hit:
+    print("\n*** Stopped early (total budget or STOP). Writing partial results. ***")
+if _timed_out_ids:
+    print("*** Subwatershed(s) skipped on per-sw timeout (NULL):", _timed_out_ids, "***")
+    print("    Raise MAX_PER_SW_SEC, or check these for a routing/loop problem.")
 flds = QgsFields(); flds.append(QgsField("id", QVariant.Int))
 flds.append(QgsField("flow_len_ft", QVariant.Double))
 if os.path.exists(lfp_path):
@@ -228,7 +405,7 @@ for col in newcols:
 pl.updateFields()
 idx = {col: pl.fields().indexFromName(col) for col in newcols}
 for ft in pl.getFeatures():
-    res = results.get(int(ft["id"]) if ft["id"] is not None else None)
+    res = results.get(int(ft["id"]) if not _null(ft["id"]) else None)
     if not res:
         continue
     for col in newcols:

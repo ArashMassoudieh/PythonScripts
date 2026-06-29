@@ -47,7 +47,7 @@ ID_FIELD   = None        # attribute to name outputs by; None -> feature order
 SNAP       = True
 SNAP_CELLS = 0           # half-window in cells; keep small (1-2) near confluences
 
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False
 # ---------------------------------------------------------------------------
 
 # --- derived paths ---------------------------------------------------------
@@ -59,6 +59,39 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 FLOWDIR_PATH = os.path.join(OUT_DIR, FLOWDIR_REL)
 FLOWACC_PATH = os.path.join(OUT_DIR, FLOWACC_REL)
+
+# --- Windows-safe overwrite helper -----------------------------------------
+# OGR's GPKG driver refuses to create over an existing file (it raises
+# "A file system object ... already exists"), and on Windows QGIS may also hold
+# a lock if the layer is loaded in the project. Remove any same-named layers
+# from the project, then delete the file plus its GPKG sidecars before writing.
+def release_and_delete(path):
+    import time
+    try:
+        proj = QgsProject.instance()
+        for lyr in list(proj.mapLayers().values()):
+            src = lyr.source().split("|")[0]
+            if os.path.normcase(os.path.abspath(src)) == \
+               os.path.normcase(os.path.abspath(path)):
+                proj.removeMapLayer(lyr.id())
+    except Exception:
+        pass
+    # delete the file + GPKG sidecars, retrying for transient Dropbox/AV locks.
+    # (Do NOT rely on QgsVectorFileWriter.deleteSilently -- it does not exist in
+    # all QGIS versions and raises AttributeError where absent.)
+    for _ in range(8):
+        present = [path + e for e in ("", "-wal", "-shm", "-journal")
+                   if os.path.exists(path + e)]
+        if not present:
+            return
+        for p in present:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        if not os.path.exists(path):
+            return
+        time.sleep(1.0)
 
 # points: look in outputs/ first, then the site folder, then as given
 def resolve_points(rel):
@@ -160,10 +193,7 @@ for i, feat in enumerate(pts.getFeatures(), start=1):
     # polygonize via the GDAL Python API directly. The gdal:polygonize
     # processing wrapper silently fails on some installs (returns success,
     # writes nothing), so we call gdal.Polygonize() and write the GPKG via OGR.
-    for ext in ("", "-wal", "-shm", "-journal"):
-        if os.path.exists(wat_vec + ext):
-            try: os.remove(wat_vec + ext)
-            except OSError: pass
+    release_and_delete(wat_vec)
     _src = gdal.Open(wat_ras)
     _band = _src.GetRasterBand(1)
     _srs = osr.SpatialReference()
@@ -185,6 +215,7 @@ for i, feat in enumerate(pts.getFeatures(), start=1):
         "INPUT": poly_layer, "EXPRESSION": '"DN" = 1', "OUTPUT": "TEMPORARY_OUTPUT"})
     diss = processing.run("native:dissolve", {
         "INPUT": sel["OUTPUT"], "FIELD": [], "OUTPUT": "TEMPORARY_OUTPUT"})
+    release_and_delete(cleaned)   # OGR won't overwrite an existing GPKG; clear it first
     processing.run("native:fieldcalculator", {
         "INPUT": diss["OUTPUT"], "FIELD_NAME": "area_km2", "FIELD_TYPE": 0,
         "FIELD_LENGTH": 12, "FIELD_PRECISION": 4,
@@ -199,12 +230,7 @@ if SNAP and made:
     fields = QgsFields()
     fields.append(QgsField("id", QVariant.String))
     if os.path.exists(snapped_path):
-        try:
-            QgsVectorFileWriter.deleteSilently(snapped_path)
-        except AttributeError:
-            for ext in ("", "-wal", "-shm", "-journal"):
-                if os.path.exists(snapped_path + ext):
-                    os.remove(snapped_path + ext)
+        release_and_delete(snapped_path)
     opts = QgsVectorFileWriter.SaveVectorOptions()
     opts.driverName = "GPKG"; opts.layerName = "pour_points_snapped"
     w = QgsVectorFileWriter.create(snapped_path, fields, QgsWkbTypes.Point,

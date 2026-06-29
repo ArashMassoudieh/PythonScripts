@@ -24,6 +24,15 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QVariant
 
+# shared lock-safe overwrite helper
+import sys as _sys
+for _sd in ("C:/Users/arash/Dropbox/Chloeta/NHA/PythonScripts",
+            "C:/Users/smnfa/Dropbox/NHA/PythonScripts",
+            "/home/arash/Dropbox/Chloeta/NHA/PythonScripts"):
+    if os.path.isdir(_sd) and _sd not in _sys.path:
+        _sys.path.insert(0, _sd)
+from ws3io import release_and_delete
+
 # --- settings (set ROOT + SITE_DIR ONCE) -----------------------------------
 try:
     ROOT
@@ -193,16 +202,7 @@ fields.append(QgsField("id", QVariant.String))
 fields.append(QgsField("area_km2", QVariant.Double))
 
 if os.path.exists(OUT_PATH):
-    try:
-        QgsVectorFileWriter.deleteSilently(OUT_PATH)
-    except AttributeError:
-        for ext in ("", "-wal", "-shm", "-journal"):
-            p = OUT_PATH + ext
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError as e:
-                    print("  WARNING: could not remove", p, "-", e)
+    release_and_delete(OUT_PATH)        # release any loaded layer + delete (lock-safe)
 
 opts = QgsVectorFileWriter.SaveVectorOptions()
 opts.driverName = "GPKG"
@@ -265,23 +265,25 @@ else:
           % OVERLAP_TOL_M2)
 
 # --- load into project (remove any stale layer pointing at this file first) -
-proj = QgsProject.instance()
-for lyr in list(proj.mapLayers().values()):
-    try:
-        if os.path.normpath(OUT_PATH) in os.path.normpath(lyr.source()):
-            proj.removeMapLayer(lyr.id())
-    except Exception:
-        pass
+ADD_TO_PROJECT = False        # do not auto-load; a loaded layer locks the gpkg
+if ADD_TO_PROJECT:
+    proj = QgsProject.instance()
+    for lyr in list(proj.mapLayers().values()):
+        try:
+            if os.path.normpath(OUT_PATH) in os.path.normpath(lyr.source()):
+                proj.removeMapLayer(lyr.id())
+        except Exception:
+            pass
 
-out_lyr = QgsVectorLayer(OUT_PATH + "|layername=subwatersheds",
-                         "subwatersheds", "ogr")
-if out_lyr.isValid():
-    proj.addMapLayer(out_lyr)
-    print("Loaded 'subwatersheds' (%d features) into the project."
-          % out_lyr.featureCount())
-else:
-    print("WARNING: subwatersheds layer did not load -- open it manually:")
-    print("  ", OUT_PATH)
+    out_lyr = QgsVectorLayer(OUT_PATH + "|layername=subwatersheds",
+                             "subwatersheds", "ogr")
+    if out_lyr.isValid():
+        proj.addMapLayer(out_lyr)
+        print("Loaded 'subwatersheds' (%d features) into the project."
+              % out_lyr.featureCount())
+    else:
+        print("WARNING: subwatersheds layer did not load -- open it manually:")
+        print("  ", OUT_PATH)
 
 print("\nDone. Output in:", OUT_DIR)
 print("Sliver fragments below %.0f m2 dropped; geometries snapped to %.3f m grid."

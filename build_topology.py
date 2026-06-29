@@ -78,7 +78,7 @@ SNAP_PX = 1.5                 # ONLY for "is an endpoint AT a junction" tests,
 SNAP_TOL = SNAP_PX * PIXEL_M  # NOT for subbasin->junction (that is nearest-wins)
 FAR_MATCH_M = 60.0            # flag (do not reject) subbasin matches beyond this
 SINK_NAME = "Outlet"
-RELOAD_IN_PROJECT = True
+RELOAD_IN_PROJECT = False
 # ---------------------------------------------------------------------------
 
 site_path = os.path.join(ROOT, SITE_DIR)

@@ -393,7 +393,7 @@ def write_gage_file(gage_path, gage_name, dss_filename, dss_pathname,
     from datetime import datetime as dt
     start = dt(2000, 1, 1, 0, 0)
     end   = start + timedelta(minutes=end_min)
-    end_str = end.strftime("%-d %B %Y, %H:%M")
+    end_str = "%d %s" % (end.day, end.strftime("%B %Y, %H:%M"))
 
     lines = [
         "Gage Manager: ",

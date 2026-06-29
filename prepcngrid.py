@@ -26,9 +26,40 @@
 # =============================================================================
 import os
 import glob
+import time
 from osgeo import gdal
 from qgis.core import QgsProject, QgsRasterLayer
 gdal.UseExceptions()
+
+
+# --- Windows-safe release + delete for a raster output ----------------------
+# A previous run loads landcover_aligned/hsg_aligned via ADD_TO_PROJECT; that
+# loaded QGIS layer holds the .tif open, so os.remove() fails with WinError 32
+# on the next run. Remove any project layer pointing at the file first, then
+# delete (retrying for transient Dropbox/AV locks).
+def release_and_delete(path):
+    target = os.path.normcase(os.path.abspath(path))
+    proj = QgsProject.instance()
+    for lyr in list(proj.mapLayers().values()):
+        src = lyr.source().split("|")[0]
+        try:
+            if os.path.normcase(os.path.abspath(src)) == target:
+                proj.removeMapLayer(lyr.id())
+        except Exception:
+            pass
+    for _ in range(8):                       # ~8s of retries for Dropbox locks
+        if not os.path.exists(path):
+            return
+        try:
+            os.remove(path)
+            return
+        except PermissionError:
+            time.sleep(1.0)
+    if os.path.exists(path):
+        raise Exception(
+            "Cannot overwrite %s -- still locked. Remove the layer from the "
+            "QGIS panel (or restart QGIS), pause Dropbox sync, then re-run."
+            % path)
 
 # --- settings (set ROOT + SITE_DIR ONCE) -----------------------------------
 try:
@@ -47,7 +78,7 @@ LC_GLOB  = "nlcd_*_wsclip.tif"       # land cover (name carries the site id)
 OUT_LC   = "landcover_aligned.tif"
 OUT_HSG  = "hsg_aligned.tif"
 
-ADD_TO_PROJECT = True
+ADD_TO_PROJECT = False   # do not auto-load outputs; load manually as needed
 # ---------------------------------------------------------------------------
 
 site_path = os.path.join(ROOT, SITE_DIR)
@@ -88,8 +119,7 @@ def bounds_from(gt, nx, ny):
 
 
 def align_to_template(src, dst, srs, bounds, nx, ny, nodata=0):
-    if os.path.exists(dst):
-        os.remove(dst)
+    release_and_delete(dst)              # release any loaded layer + delete (lock-safe)
     gdal.Warp(
         dst, src,
         options=gdal.WarpOptions(
@@ -130,10 +160,20 @@ print("Grid match with DEM:", "YES" if same else "NO -- check inputs")
 
 # --- load into the QGIS project --------------------------------------------
 if ADD_TO_PROJECT:
+    proj = QgsProject.instance()
     for path, name in [(out_lc, "landcover_aligned"), (out_hsg, "hsg_aligned")]:
+        # drop any prior copies of this output so reruns don't stack duplicates
+        tgt = os.path.normcase(os.path.abspath(path))
+        for lyr in list(proj.mapLayers().values()):
+            src = lyr.source().split("|")[0]
+            try:
+                if os.path.normcase(os.path.abspath(src)) == tgt:
+                    proj.removeMapLayer(lyr.id())
+            except Exception:
+                pass
         rl = QgsRasterLayer(path, name)
         if rl.isValid():
-            QgsProject.instance().addMapLayer(rl)
+            proj.addMapLayer(rl)
             print("  added to project:", name)
         else:
             print("  could not load:", path)
